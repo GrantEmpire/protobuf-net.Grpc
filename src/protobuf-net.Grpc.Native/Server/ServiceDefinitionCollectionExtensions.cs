@@ -1,6 +1,8 @@
 ﻿using Grpc.Core;
+using Grpc.Core.Interceptors;
 using ProtoBuf.Grpc.Configuration;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using static Grpc.Core.Server;
 
@@ -14,14 +16,34 @@ namespace ProtoBuf.Grpc.Server
         /// <summary>
         /// Adds a code-first service to the available services
         /// </summary>
+        public static int AddCodeFirst<TService>(ServiceDefinitionCollection services, TService service,
+            BinderConfiguration? binderConfiguration,
+            TextWriter? log)
+            where TService : class // forwarded to preserve older API
+            => AddCodeFirst<TService>(services, service, binderConfiguration, log, null);
+
+        /// <summary>
+        /// Adds a code-first service to the available services
+        /// </summary>
         public static int AddCodeFirst<TService>(this ServiceDefinitionCollection services, TService service,
             BinderConfiguration? binderConfiguration = null,
-            TextWriter? log = null)
+            TextWriter? log = null,
+            IEnumerable<Interceptor>? interceptors = null)
             where TService : class
         {
             var builder = ServerServiceDefinition.CreateBuilder();
             int count = Binder.Create(log).Bind<TService>(builder, binderConfiguration, service);
-            services.Add(builder.Build());
+            var serverServiceDefinition = builder.Build();
+            
+            if (interceptors is object)
+            {
+                foreach(var interceptor in interceptors)
+                {
+                    serverServiceDefinition = serverServiceDefinition.Intercept(interceptor);
+                }
+            }
+
+            services.Add(serverServiceDefinition);
             return count;
         }
 
@@ -37,12 +59,19 @@ namespace ProtoBuf.Grpc.Server
                 base.OnServiceBound(state, serviceName, serviceType, serviceContract, operationCount);
                 _log?.WriteLine($"{serviceName} bound to {serviceType.Name} : {serviceContract.Name} with {operationCount} operation(s)");
             }
-            protected override bool TryBind<TService, TRequest, TResponse>(object state, Method<TRequest, TResponse> method, MethodStub<TService> stub)
+
+            protected override void OnError(string message, object?[]? args = null)
+                => _log?.WriteLine("[error] " + message, args ?? Array.Empty<object>());
+
+            protected override void OnWarn(string message, object?[]? args = null)
+                => _log?.WriteLine("[warning] " + message, args ?? Array.Empty<object>());
+
+            protected override bool TryBind<TService, TRequest, TResponse>(ServiceBindContext bindContext, Method<TRequest, TResponse> method, MethodStub<TService> stub)
                 where TService : class
                 where TRequest : class
                 where TResponse : class
             {
-                var builder = (ServerServiceDefinition.Builder)state;
+                var builder = (ServerServiceDefinition.Builder)bindContext.State;
                 switch (method.Type)
                 {
                     case MethodType.Unary:

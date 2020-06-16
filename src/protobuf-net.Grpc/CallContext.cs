@@ -25,8 +25,12 @@ namespace ProtoBuf.Grpc
         public CallOptions CallOptions
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get;
+            get => _callOptions;
         }
+
+        private readonly CallOptions _callOptions;
+
+        private readonly CallContextFlags _flags;
 
         /// <summary>
         /// The server call-context; this will only be valid for server operations
@@ -88,10 +92,19 @@ namespace ProtoBuf.Grpc
         {
             if (server == null) ThrowNoServerProvided();
             _hybridContext = server;
+            _flags = CallContextFlags.None;
             ServerCallContext = context;
-            CallOptions = context == null ? default : new CallOptions(context.RequestHeaders, context.Deadline, context.CancellationToken, context.WriteOptions);
+            _callOptions = context == null ? default : new CallOptions(context.RequestHeaders, context.Deadline, context.CancellationToken, context.WriteOptions);
 
             static void ThrowNoServerProvided() => throw new ArgumentNullException(nameof(server), "A server instance is required and was not provided");
+        }
+
+        internal CallContext(in CallContext parent, CancellationToken cancellationToken)
+        {
+            _hybridContext = parent._hybridContext;
+            _flags = parent._flags;
+            ServerCallContext = parent.ServerCallContext;
+            _callOptions = parent._callOptions.WithCancellationToken(cancellationToken);
         }
 
         /// <summary>
@@ -118,10 +131,13 @@ namespace ProtoBuf.Grpc
         /// </summary>
         public CallContext(in CallOptions callOptions = default, CallContextFlags flags = CallContextFlags.None, object? state = null)
         {
-            CallOptions = callOptions;
+            _callOptions = callOptions;
             ServerCallContext = default;
             _hybridContext = (flags & CallContextFlags.CaptureMetadata) == 0 ? state : new MetadataContext(state);
+            _flags = flags;
         }
+
+        internal bool IgnoreStreamTermination => (_flags & CallContextFlags.IgnoreStreamTermination) != 0;
 
         /// <summary>
         /// Creates a call-context that represents a client operation
@@ -161,7 +177,7 @@ namespace ProtoBuf.Grpc
         private T ThrowNoContext<T>()
         {
             if (ServerCallContext != null) throw new InvalidOperationException("Response metadata is not available for server contexts");
-            throw new InvalidOperationException("The CaptureMetadata flag must be specified when creating the CallContext to enable response metadata");
+            throw new InvalidOperationException($"The {nameof(CallContextFlags.CaptureMetadata)} flag must be specified when creating the {nameof(CallContext)} to enable response metadata");
         }
     }
 
@@ -178,6 +194,10 @@ namespace ProtoBuf.Grpc
         /// <summary>
         /// Response metadata (headers, trailers, status) will be captured and made available on the context
         /// </summary>
-        CaptureMetadata = 1,
+        CaptureMetadata = 1 << 0,
+        /// <summary>
+        /// Suppresses the exception when a streaming message cannot be sent because the other end terminates the connection
+        /// </summary>
+        IgnoreStreamTermination = 1 << 1
     }
 }

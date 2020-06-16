@@ -4,6 +4,8 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <OutputType>Exe</OutputType>
     <TargetFramework>netcoreapp3.0</TargetFramework>
+    <SignAssembly>false</SignAssembly>
+    <LangVersion>4.7</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +18,10 @@
     <PackageReference Include="Grpc.Net.Client" Version="$(GrpcDotNetVersion)" />
     <ProjectReference Include="..\Shared_FS\Shared_FS.fsproj" />
     <PackageReference Include="TaskBuilder.fs" Version="2.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Update="FSharp.Core" Version="4.7.2" />
   </ItemGroup>
 
 </Project>

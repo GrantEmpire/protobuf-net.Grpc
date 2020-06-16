@@ -6,7 +6,6 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using ProtoBuf.Grpc.Configuration;
 using System;
-using System.Collections.Generic;
 
 namespace ProtoBuf.Grpc.Server
 {
@@ -42,27 +41,30 @@ namespace ProtoBuf.Grpc.Server
 
             void IServiceMethodProvider<TService>.OnServiceMethodDiscovery(ServiceMethodProviderContext<TService> context)
             {
-                int count = Binder.Instance.Bind<TService>(context, _binderConfiguration);
+                int count = new Binder(_logger).Bind<TService>(context, _binderConfiguration);
                 if (count != 0) _logger.Log(LogLevel.Information, "RPC services being provided by {0}: {1}", typeof(TService), count);
             }
         }
         private sealed class Binder : ServerBinder
         {
-            private Binder() { }
-            public static readonly Binder Instance = new Binder();
+            private readonly ILogger _logger;
+            internal Binder(ILogger logger)
+                => _logger = logger;
 
-            protected override bool TryBind<TService, TRequest, TResponse>(object state, Method<TRequest, TResponse> method, MethodStub<TService> stub)
+            protected override void OnWarn(string message, object?[]? args)
+                => _logger?.LogWarning(message, args ?? Array.Empty<object>());
+
+            protected override void OnError(string message, object?[]? args = null)
+                => _logger?.LogError(message, args ?? Array.Empty<object>());
+
+            protected override bool TryBind<TService, TRequest, TResponse>(ServiceBindContext bindContext, Method<TRequest, TResponse> method, MethodStub<TService> stub)
                 where TService : class
                 where TRequest : class
                 where TResponse : class
             {
-                var metadata = new List<object>();
-                // Add type metadata first so it has a lower priority
-                metadata.AddRange(typeof(TService).GetCustomAttributes(inherit: true));
-                // Add method metadata last so it has a higher priority
-                metadata.AddRange(stub.Method.GetCustomAttributes(inherit: true));
+                var metadata = bindContext.GetMetadata(stub.Method);
                 
-                var context = (ServiceMethodProviderContext<TService>)state;
+                var context = (ServiceMethodProviderContext<TService>)bindContext.State;
                 switch (method.Type)
                 {
                     case MethodType.Unary:

@@ -1,12 +1,13 @@
 ﻿using Grpc.Core;
+using ProtoBuf.Grpc.Configuration;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
-using ProtoBuf.Grpc.Configuration;
-using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace ProtoBuf.Grpc.Internal
 {
@@ -57,14 +58,27 @@ namespace ProtoBuf.Grpc.Internal
         //    }
         //}
 
-        //private static void Ldloca(ILGenerator il, LocalBuilder local)
-        //{
-        //    switch (local.LocalIndex)
-        //    {
-        //        case int i when (i >= 0 & i <= 255): il.Emit(OpCodes.Ldloca_S, (byte)i); break;
-        //        default: il.Emit(OpCodes.Ldloca, local); break;
-        //    }
-        //}
+        private static void Ldloca(ILGenerator il, LocalBuilder local)
+        {
+            switch (local.LocalIndex)
+            {
+                case int i when (i >= 0 & i <= 255): il.Emit(OpCodes.Ldloca_S, (byte)i); break;
+                default: il.Emit(OpCodes.Ldloca, local); break;
+            }
+        }
+
+        private static void Stloc(ILGenerator il, LocalBuilder local)
+        {
+            switch (local.LocalIndex)
+            {
+                case 0: il.Emit(OpCodes.Stloc_0); break;
+                case 1: il.Emit(OpCodes.Stloc_1); break;
+                case 2: il.Emit(OpCodes.Stloc_2); break;
+                case 3: il.Emit(OpCodes.Stloc_3); break;
+                case int i when (i >= 4 & i <= 255): il.Emit(OpCodes.Stloc_S, (byte)i); break;
+                default: il.Emit(OpCodes.Stloc, local); break;
+            }
+        }
 
         private static void Ldarga(ILGenerator il, ushort index)
         {
@@ -77,30 +91,51 @@ namespace ProtoBuf.Grpc.Internal
                 il.Emit(OpCodes.Ldarga, index);
             }
         }
-        //private static void Ldarg(ILGenerator il, ushort index)
-        //{
-        //    switch (index)
-        //    {
-        //        case 0: il.Emit(OpCodes.Ldarg_0); break;
-        //        case 1: il.Emit(OpCodes.Ldarg_1); break;
-        //        case 2: il.Emit(OpCodes.Ldarg_2); break;
-        //        case 3: il.Emit(OpCodes.Ldarg_3); break;
-        //        case ushort x when x <= 255: il.Emit(OpCodes.Ldarg_S, (byte)x); break;
-        //        default: il.Emit(OpCodes.Ldarg, index); break;
-        //    }
-        //}
+        private static void Ldarg(ILGenerator il, ushort index)
+        {
+            switch (index)
+            {
+                case 0: il.Emit(OpCodes.Ldarg_0); break;
+                case 1: il.Emit(OpCodes.Ldarg_1); break;
+                case 2: il.Emit(OpCodes.Ldarg_2); break;
+                case 3: il.Emit(OpCodes.Ldarg_3); break;
+                case ushort x when x <= 255: il.Emit(OpCodes.Ldarg_S, (byte)x); break;
+                default: il.Emit(OpCodes.Ldarg, index); break;
+            }
+        }
 
         static int _typeIndex;
         private static readonly MethodInfo s_marshallerCacheGenericMethodDef
             = typeof(MarshallerCache).GetMethod(nameof(MarshallerCache.GetMarshaller), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-        internal static Func<TChannel, TService> CreateFactory<TChannel, TService>(Type baseType, BinderConfiguration binderConfig)
+        internal static Func<CallInvoker, TService> CreateFactory<TService>(BinderConfiguration binderConfig)
            where TService : class
         {
-            if (baseType == null) throw new ArgumentNullException(nameof(baseType));
-
             // front-load reflection discovery
             if (!typeof(TService).IsInterface)
                 throw new InvalidOperationException("Type is not an interface: " + typeof(TService).FullName);
+
+            if (binderConfig == BinderConfiguration.Default) // only use ProxyAttribute for default binder
+            {
+                var proxy = (typeof(TService).GetCustomAttribute(typeof(ProxyAttribute)) as ProxyAttribute)?.Type;
+                if (proxy is object) return CreateViaActivator<TService>(proxy);
+            }
+
+            return EmitFactory<TService>(binderConfig);
+        }
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static Func<CallInvoker, TService> CreateViaActivator<TService>(Type type)
+        {
+            return channel => (TService)Activator.CreateInstance(
+                        type,
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                        null,
+                        new object[] { channel },
+                        null);
+        }
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static Func<CallInvoker, TService> EmitFactory<TService>(BinderConfiguration binderConfig)
+        {
+            Type baseType = typeof(ClientBase);
 
             var callInvoker = baseType.GetProperty("CallInvoker", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
             if (callInvoker == null || callInvoker.ReturnType != typeof(CallInvoker) || callInvoker.GetParameters().Length != 0)
@@ -115,7 +150,7 @@ namespace ProtoBuf.Grpc.Internal
                 type.SetParent(baseType);
 
                 // public IFooProxy(CallInvoker callInvoker) : base(callInvoker) { }
-                var ctorCallInvoker = WritePassThruCtor<TChannel>(MethodAttributes.Public);
+                var ctorCallInvoker = WritePassThruCtor<CallInvoker>(MethodAttributes.Public);
 
                 // override ToString
                 {
@@ -124,7 +159,7 @@ namespace ProtoBuf.Grpc.Internal
                     typeof(string), Type.EmptyTypes);
                     var il = toString.GetILGenerator();
                     if (!binderConfig.Binder.IsServiceContract(typeof(TService), out var primaryServiceName)) primaryServiceName = typeof(TService).Name;
-                    il.Emit(OpCodes.Ldstr, primaryServiceName + " / " + typeof(TChannel).Name);
+                    il.Emit(OpCodes.Ldstr, primaryServiceName + " / " + typeof(CallInvoker).Name);
                     il.Emit(OpCodes.Ret);
                     type.DefineMethodOverride(toString, baseToString);
                 }
@@ -132,7 +167,7 @@ namespace ProtoBuf.Grpc.Internal
                 const string InitMethodName = "Init";
                 var cctor = type.DefineMethod(InitMethodName, MethodAttributes.Static | MethodAttributes.Public).GetILGenerator();
 
-                var ops = ContractOperation.FindOperations(binderConfig, typeof(TService));
+                var ops = ContractOperation.FindOperations(binderConfig, typeof(TService), null);
 
                 int marshallerIndex = 0;
                 Dictionary<Type, (FieldBuilder Field, string Name, object Instance)> marshallers = new Dictionary<Type, (FieldBuilder, string, object)>();
@@ -167,7 +202,7 @@ namespace ProtoBuf.Grpc.Internal
                         type.DefineMethodOverride(impl, iMethod);
 
                         var il = impl.GetILGenerator();
-                        if (!(isService && ContractOperation.TryIdentifySignature(iMethod, binderConfig, out var op)))
+                        if (!(isService && ContractOperation.TryIdentifySignature(iMethod, binderConfig, out var op, null)))
                         {
                             il.ThrowException(typeof(NotSupportedException));
                             continue;
@@ -197,6 +232,7 @@ namespace ProtoBuf.Grpc.Internal
                                 break;
                             case ContextKind.NoContext:
                             case ContextKind.CallContext:
+                            case ContextKind.CancellationToken:
                                 // typically looks something like (where this is an extension method on Reshape):
                                 // => context.{ReshapeMethod}(CallInvoker, {method}, request, [host: null]);
                                 var method = op.TryGetClientHelper();
@@ -207,13 +243,24 @@ namespace ProtoBuf.Grpc.Internal
                                 }
                                 else
                                 {
-                                    if (op.Context == ContextKind.CallContext)
+                                    switch (op.Context)
                                     {
-                                        Ldarga(il, op.VoidRequest ? (ushort)1 : (ushort)2);
-                                    }
-                                    else
-                                    {
-                                        il.Emit(OpCodes.Ldsflda, s_CallContext_Default);
+                                        case ContextKind.CallContext:
+                                            Ldarga(il, op.VoidRequest ? (ushort)1 : (ushort)2);
+                                            break;
+                                        case ContextKind.CancellationToken:
+                                            var callContext = il.DeclareLocal(typeof(CallContext));
+                                            Ldarg(il, op.VoidRequest ? (ushort)1 : (ushort)2);
+                                            il.EmitCall(OpCodes.Call, s_CallContext_FromCancellationToken, null);
+                                            Stloc(il, callContext);
+                                            Ldloca(il, callContext);
+                                            break;
+                                        case ContextKind.NoContext:
+                                            il.Emit(OpCodes.Ldsflda, s_CallContext_Default);
+                                            break;
+                                        default:
+                                            // shouldn't get here - we checked above! this is in case of code maintenance errors
+                                            throw new NotImplementedException($"Unhandled context kind: {op.Context}");
                                     }
                                     il.Emit(OpCodes.Ldarg_0); // this.
                                     il.EmitCall(OpCodes.Callvirt, callInvoker, null); // get_CallInvoker
@@ -255,9 +302,9 @@ namespace ProtoBuf.Grpc.Internal
                 finalType.GetMethod(InitMethodName, BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!.Invoke(null, Array.Empty<object>());
 
                 // return the factory
-                var p = Expression.Parameter(typeof(TChannel), "channel");
-                return Expression.Lambda<Func<TChannel, TService>>(
-                    Expression.New(finalType.GetConstructor(new[] { typeof(TChannel) }), p), p).Compile();
+                var p = Expression.Parameter(typeof(CallInvoker), "channel");
+                return Expression.Lambda<Func<CallInvoker, TService>>(
+                    Expression.New(finalType.GetConstructor(new[] { typeof(CallInvoker) }), p), p).Compile();
 
                 ConstructorBuilder? WritePassThruCtor<T>(MethodAttributes accessibility)
                 {
@@ -275,12 +322,15 @@ namespace ProtoBuf.Grpc.Internal
                 }
             }
         }
-#pragma warning disable CS0618 // Empty
         internal static readonly FieldInfo
             s_CallContext_Default = typeof(CallContext).GetField(nameof(CallContext.Default))!,
+#pragma warning disable CS0618 // Empty
             s_Empty_Instance = typeof(Empty).GetField(nameof(Empty.Instance))!,
             s_Empty_InstaneTask= typeof(Empty).GetField(nameof(Empty.InstanceTask))!;
 #pragma warning restore CS0618
+
+        internal static readonly MethodInfo s_CallContext_FromCancellationToken = typeof(CallContext).GetMethod("op_Implicit", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(CancellationToken) }, null)!;
+
         internal const string FactoryName = "Create";
     }
 }

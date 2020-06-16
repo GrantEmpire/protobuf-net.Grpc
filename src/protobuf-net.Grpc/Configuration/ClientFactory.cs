@@ -1,9 +1,9 @@
-﻿using ProtoBuf.Grpc.Internal;
+﻿using Grpc.Core;
+using ProtoBuf.Grpc.Client;
+using ProtoBuf.Grpc.Internal;
 using System;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
-using ProtoBuf.Grpc.Configuration;
-using Grpc.Core;
 
 namespace ProtoBuf.Grpc.Configuration
 {
@@ -24,58 +24,71 @@ namespace ProtoBuf.Grpc.Configuration
             => (binderConfiguration == null || binderConfiguration == BinderConfiguration.Default) ? Default : new ConfiguredClientFactory(binderConfiguration);
 
         /// <summary>
+        /// Get the binder configuration associated with this instance
+        /// </summary>
+        protected abstract BinderConfiguration BinderConfiguration { get; }
+
+        /// <summary>
+        /// Get the binder configuration associated with this instance
+        /// </summary>
+        public static implicit operator BinderConfiguration(ClientFactory value) => value.BinderConfiguration;
+
+        /// <summary>
         /// Create a service-client backed by a CallInvoker
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public TService CreateClient<TService>(CallInvoker channel) where TService : class
-#pragma warning disable CS0618 // SimpleClientBase is marked Obsolete to discourage usage
-            => CreateClient<SimpleClientBase, TService, CallInvoker>(channel);
-#pragma warning restore CS0618
+        public abstract TService CreateClient<TService>(CallInvoker channel) where TService : class;
 
-        // TODO: remove this, standardizing on SimpleClient (or LiteClientBase) and CallInvoker?
-        internal abstract TService CreateClient<TBase, TService, TChannel>(TChannel channel) where TService : class;
+        /// <summary>
+        /// Create a service-client backed by a CallInvoker
+        /// </summary>
+        public virtual GrpcClient CreateClient(CallInvoker channel, Type contractType)
+            => new GrpcClient(channel, contractType, BinderConfiguration);
 
 
         private sealed class ConfiguredClientFactory : ClientFactory
         {
-            private readonly BinderConfiguration _binderConfiguration;
+            protected override BinderConfiguration BinderConfiguration { get; }
+
             public ConfiguredClientFactory(BinderConfiguration? binderConfiguration)
             {
-                _binderConfiguration = binderConfiguration ?? BinderConfiguration.Default;
+                BinderConfiguration = binderConfiguration ?? BinderConfiguration.Default;
             }
 
-            private readonly ConcurrentDictionary<(Type, Type, Type), object> _proxyCache = new ConcurrentDictionary<(Type, Type, Type), object>();
+            private readonly ConcurrentDictionary<Type, object> _proxyCache = new ConcurrentDictionary<Type, object>();
 
             [MethodImpl(MethodImplOptions.NoInlining)]
-            private TService SlowCreateClient<TBase, TService, TChannel>(TChannel channel)
+            private TService SlowCreateClient<TService>(CallInvoker channel)
                 where TService : class
             {
-                var factory = ProxyEmitter.CreateFactory<TChannel, TService>(typeof(TBase), _binderConfiguration);
-                var key = (typeof(TBase), typeof(TService), typeof(TChannel));
+                var factory = ProxyEmitter.CreateFactory<TService>(BinderConfiguration);
+                var key = typeof(TService);
 
-                if (!_proxyCache.TryAdd(key, factory)) factory = (Func<TChannel, TService>)_proxyCache[key];
+                if (!_proxyCache.TryAdd(key, factory)) factory = (Func<CallInvoker, TService>)_proxyCache[key];
                 return factory(channel);
             }
-            internal override TService CreateClient<TBase, TService, TChannel>(TChannel channel)
+            public override TService CreateClient<TService>(CallInvoker channel)
                 where TService : class
             {
-                if (_proxyCache.TryGetValue((typeof(TBase), typeof(TService), typeof(TChannel)), out var obj))
-                    return ((Func<TChannel, TService>)obj)(channel);
-                return SlowCreateClient<TBase, TService, TChannel>(channel);
+                if (_proxyCache.TryGetValue(typeof(TService), out var obj))
+                    return ((Func<CallInvoker, TService>)obj)(channel);
+                return SlowCreateClient<TService>(channel);
             }
         }
 
-        internal static class DefaultProxyCache<TBase, TService, TChannel> where TService : class
+        internal static class DefaultProxyCache<TService> where TService : class
         {
-            internal static readonly Func<TChannel, TService> Create = ProxyEmitter.CreateFactory<TChannel, TService>(typeof(TBase), BinderConfiguration.Default);
+            internal static readonly Func<CallInvoker, TService> Create = ProxyEmitter.CreateFactory<TService>(BinderConfiguration.Default);
         }
 
         private sealed class DefaultClientFactory : ClientFactory
         {
+            protected override BinderConfiguration BinderConfiguration => BinderConfiguration.Default;
+
             public static readonly DefaultClientFactory Instance = new DefaultClientFactory();
             private DefaultClientFactory() { }
 
-            internal override TService CreateClient<TBase, TService, TChannel>(TChannel channel) => DefaultProxyCache<TBase, TService, TChannel>.Create(channel);
+            public override TService CreateClient<TService>(CallInvoker channel) => DefaultProxyCache<TService>.Create(channel);
         }
     }
 }

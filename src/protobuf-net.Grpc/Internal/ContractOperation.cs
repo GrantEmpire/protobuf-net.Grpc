@@ -5,6 +5,7 @@ using Grpc.Core;
 using ProtoBuf.Grpc.Configuration;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Threading;
 
 namespace ProtoBuf.Grpc.Internal
 {
@@ -50,11 +51,13 @@ namespace ProtoBuf.Grpc.Internal
             CallOptions,
             ServerCallContext,
             CallContext,
+            CancellationToken,
             AsyncUnaryCall,
             AsyncClientStreamingCall,
             AsyncDuplexStreamingCall,
             AsyncServerStreamingCall,
             Data,
+            Invalid,
         }
 
         const int RET = -1, VOID = -2;
@@ -89,6 +92,13 @@ namespace ProtoBuf.Grpc.Internal
                 { (TypeCategory.CallContext,TypeCategory.None, TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CallContext, MethodType.Unary, ResultKind.Task, VoidKind.Request, VOID, RET) },
                 { (TypeCategory.CallContext,TypeCategory.None, TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.CallContext, MethodType.Unary, ResultKind.ValueTask, VoidKind.Request, VOID, RET) },
 
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.Void), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Sync, VoidKind.Both,VOID, VOID)},
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.Data), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Sync, VoidKind.Request, VOID, RET)},
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.UntypedTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Task, VoidKind.Both, VOID, VOID) },
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.UntypedValueTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.ValueTask, VoidKind.Both,VOID, VOID) },
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Task, VoidKind.Request, VOID, RET) },
+                { (TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.ValueTask, VoidKind.Request, VOID, RET) },
+
                 // unary with parameter, with or without a return value
                 { (TypeCategory.Data, TypeCategory.None,TypeCategory.None, TypeCategory.Void), (ContextKind.NoContext, MethodType.Unary, ResultKind.Sync, VoidKind.Response, 0, VOID)},
                 { (TypeCategory.Data, TypeCategory.None,TypeCategory.None, TypeCategory.Data), (ContextKind.NoContext, MethodType.Unary, ResultKind.Sync, VoidKind.None, 0, RET)},
@@ -104,6 +114,13 @@ namespace ProtoBuf.Grpc.Internal
                 { (TypeCategory.Data, TypeCategory.CallContext,TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CallContext, MethodType.Unary, ResultKind.Task, VoidKind.None, 0, RET) },
                 { (TypeCategory.Data, TypeCategory.CallContext,TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.CallContext, MethodType.Unary, ResultKind.ValueTask, VoidKind.None, 0, RET) },
 
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.Void), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Sync, VoidKind.Response,0, VOID)},
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.Data), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Sync, VoidKind.None, 0, RET)},
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.UntypedTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Task, VoidKind.Response, 0, VOID) },
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.UntypedValueTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.ValueTask, VoidKind.Response,0, VOID) },
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.Task, VoidKind.None, 0, RET) },
+                { (TypeCategory.Data, TypeCategory.CancellationToken,TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.CancellationToken, MethodType.Unary, ResultKind.ValueTask, VoidKind.None, 0, RET) },
+
                 // client streaming
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.None, TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.NoContext, MethodType.ClientStreaming, ResultKind.ValueTask, VoidKind.None, 0, RET) },
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.None, TypeCategory.None, TypeCategory.UntypedValueTask), (ContextKind.NoContext, MethodType.ClientStreaming, ResultKind.ValueTask, VoidKind.Response, 0, VOID) },
@@ -115,21 +132,29 @@ namespace ProtoBuf.Grpc.Internal
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.CallContext, TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CallContext, MethodType.ClientStreaming, ResultKind.Task, VoidKind.None, 0, RET) },
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.CallContext, TypeCategory.None, TypeCategory.UntypedTask), (ContextKind.CallContext, MethodType.ClientStreaming, ResultKind.Task, VoidKind.Response, 0, VOID) },
 
+                { (TypeCategory.IAsyncEnumerable, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.TypedValueTask), (ContextKind.CancellationToken, MethodType.ClientStreaming, ResultKind.ValueTask, VoidKind.None, 0, RET) },
+                { (TypeCategory.IAsyncEnumerable, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.UntypedValueTask), (ContextKind.CancellationToken, MethodType.ClientStreaming, ResultKind.ValueTask, VoidKind.Response, 0, VOID) },
+                { (TypeCategory.IAsyncEnumerable, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.TypedTask), (ContextKind.CancellationToken, MethodType.ClientStreaming, ResultKind.Task, VoidKind.None, 0, RET) },
+                { (TypeCategory.IAsyncEnumerable, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.UntypedTask), (ContextKind.CancellationToken, MethodType.ClientStreaming, ResultKind.Task, VoidKind.Response, 0, VOID) },
+
                 // server streaming
                 { (TypeCategory.None, TypeCategory.None, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.NoContext, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.Request, VOID, RET) },
                 { (TypeCategory.CallContext, TypeCategory.None, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CallContext, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.Request, VOID, RET) },
+                { (TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CancellationToken, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.Request, VOID, RET) },
                 { (TypeCategory.Data, TypeCategory.None, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.NoContext, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
                 { (TypeCategory.Data, TypeCategory.CallContext, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CallContext, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
+                { (TypeCategory.Data, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CancellationToken, MethodType.ServerStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
 
                 // duplex
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.None, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.NoContext, MethodType.DuplexStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
                 { (TypeCategory.IAsyncEnumerable, TypeCategory.CallContext, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CallContext, MethodType.DuplexStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
+                { (TypeCategory.IAsyncEnumerable, TypeCategory.CancellationToken, TypeCategory.None, TypeCategory.IAsyncEnumerable), (ContextKind.CancellationToken, MethodType.DuplexStreaming, ResultKind.AsyncEnumerable, VoidKind.None, 0, RET) },
         };
         internal static int SignatureCount => s_signaturePatterns.Count;
 
-        internal static int GeneralPurposeSignatureCount() => s_signaturePatterns.Values.Count(x => x.Context == ContextKind.CallContext || x.Context == ContextKind.NoContext);
+        internal static int GeneralPurposeSignatureCount() => s_signaturePatterns.Values.Count(x => x.Context == ContextKind.CallContext || x.Context == ContextKind.NoContext || x.Context == ContextKind.CancellationToken);
 
-        static TypeCategory GetCategory(MarshallerCache marshallerCache, Type type)
+        static TypeCategory GetCategory(MarshallerCache marshallerCache, Type type, IBindContext? bindContext)
         {
             if (type == null) return TypeCategory.None;
             if (type == typeof(void)) return TypeCategory.Void;
@@ -138,6 +163,7 @@ namespace ProtoBuf.Grpc.Internal
             if (type == typeof(ServerCallContext)) return TypeCategory.ServerCallContext;
             if (type == typeof(CallOptions)) return TypeCategory.CallOptions;
             if (type == typeof(CallContext)) return TypeCategory.CallContext;
+            if (type == typeof(CancellationToken)) return TypeCategory.CancellationToken;
 
             if (type.IsGenericType)
             {
@@ -155,22 +181,24 @@ namespace ProtoBuf.Grpc.Internal
 
             if (typeof(Delegate).IsAssignableFrom(type)) return TypeCategory.None; // yeah, that's not going to happen
 
-            return marshallerCache.CanSerializeType(type) ? TypeCategory.Data : TypeCategory.None;
+            if (marshallerCache.CanSerializeType(type)) return TypeCategory.Data;
+            bindContext?.LogWarning("Type cannot be serialized; ignoring: {0}", type.FullName);
+            return TypeCategory.Invalid;
         }
 
-        internal static (TypeCategory Arg0, TypeCategory Arg1, TypeCategory Arg2, TypeCategory Ret) GetSignature(MarshallerCache marshallerCache, MethodInfo method)
-            => GetSignature(marshallerCache, method.GetParameters(), method.ReturnType);
+        internal static (TypeCategory Arg0, TypeCategory Arg1, TypeCategory Arg2, TypeCategory Ret) GetSignature(MarshallerCache marshallerCache, MethodInfo method, IBindContext? bindContext)
+            => GetSignature(marshallerCache, method.GetParameters(), method.ReturnType, bindContext);
 
-        private static (TypeCategory Arg0, TypeCategory Arg1, TypeCategory Arg2, TypeCategory Ret) GetSignature(MarshallerCache marshallerCache, ParameterInfo[] args, Type returnType)
+        private static (TypeCategory Arg0, TypeCategory Arg1, TypeCategory Arg2, TypeCategory Ret) GetSignature(MarshallerCache marshallerCache, ParameterInfo[] args, Type returnType, IBindContext? bindContext)
         {
             (TypeCategory Arg0, TypeCategory Arg1, TypeCategory Arg2, TypeCategory Ret) signature = default;
-            if (args.Length >= 1) signature.Arg0 = GetCategory(marshallerCache, args[0].ParameterType);
-            if (args.Length >= 2) signature.Arg1 = GetCategory(marshallerCache, args[1].ParameterType);
-            if (args.Length >= 3) signature.Arg2 = GetCategory(marshallerCache, args[2].ParameterType);
-            signature.Ret = GetCategory(marshallerCache, returnType);
+            if (args.Length >= 1) signature.Arg0 = GetCategory(marshallerCache, args[0].ParameterType, bindContext);
+            if (args.Length >= 2) signature.Arg1 = GetCategory(marshallerCache, args[1].ParameterType, bindContext);
+            if (args.Length >= 3) signature.Arg2 = GetCategory(marshallerCache, args[2].ParameterType, bindContext);
+            signature.Ret = GetCategory(marshallerCache, returnType, bindContext);
             return signature;
         }
-        internal static bool TryIdentifySignature(MethodInfo method, BinderConfiguration binderConfig, out ContractOperation operation)
+        internal static bool TryIdentifySignature(MethodInfo method, BinderConfiguration binderConfig, out ContractOperation operation, IBindContext? bindContext)
         {
             operation = default;
 
@@ -183,7 +211,7 @@ namespace ProtoBuf.Grpc.Internal
             var args = method.GetParameters();
             if (args.Length > 3) return false; // too many parameters
 
-            var signature = GetSignature(binderConfig.MarshallerCache, args, method.ReturnType);
+            var signature = GetSignature(binderConfig.MarshallerCache, args, method.ReturnType, bindContext);
 
             if (!s_signaturePatterns.TryGetValue(signature, out var config)) return false;
 
@@ -235,14 +263,22 @@ namespace ProtoBuf.Grpc.Internal
             operation = new ContractOperation(opName!, from, to, method, config.Method, config.Context, config.Result, config.Void);
             return true;
         }
-        public static List<ContractOperation> FindOperations(BinderConfiguration binderConfig, Type contractType)
+        public static List<ContractOperation> FindOperations(BinderConfiguration binderConfig, Type contractType, IBindContext? bindContext)
         {
-            var all = contractType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var all = contractType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
             var ops = new List<ContractOperation>(all.Length);
             foreach (var method in all)
             {
-                if (TryIdentifySignature(method, binderConfig, out var op))
+                if (method.DeclaringType == typeof(object))
+                { /* skip */ }
+                else if (TryIdentifySignature(method, binderConfig, out var op, bindContext))
+                {
                     ops.Add(op);
+                }
+                else
+                {
+                    bindContext?.LogWarning("Signature not recognized for {0}.{1}; method will not be bound", contractType.FullName, method.Name);
+                }
             }
             return ops;
         }
@@ -280,18 +316,20 @@ namespace ProtoBuf.Grpc.Internal
             {(MethodType.Unary, ResultKind.Sync, VoidKind.Response), nameof(Reshape.UnarySyncVoid) },
         };
 #pragma warning restore CS0618
+
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0066:Convert switch statement to expression", Justification = "Isn't actually C# 8.0 (but works on preview compiler)")]
         private string? GetClientHelperName()
         {
             switch (Context)
             {
                 case ContextKind.CallContext:
                 case ContextKind.NoContext:
+                case ContextKind.CancellationToken:
                     return _clientResponseMap.TryGetValue((MethodType, Result, Void & VoidKind.Response), out var helper) ? helper : null;
                 default:
                     return null;
-            }
+            };
         }
-
 
         internal bool IsSyncT()
         {
@@ -324,6 +362,7 @@ namespace ProtoBuf.Grpc.Internal
         CallContext, // pb-net shared context kind
         CallOptions, // GRPC core client context kind
         ServerCallContext, // GRPC core server context kind
+        CancellationToken, // cancellation (without extra context)
     }
 
     internal enum ResultKind

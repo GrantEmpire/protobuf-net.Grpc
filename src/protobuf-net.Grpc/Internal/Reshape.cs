@@ -29,7 +29,7 @@ namespace ProtoBuf.Grpc.Internal
             return Awaited(task);
             static async Task<Empty> Awaited(ValueTask t)
             {
-                await t;
+                await t.ConfigureAwait(false);
                 return Empty.Instance;
             }
         }
@@ -42,16 +42,12 @@ namespace ProtoBuf.Grpc.Internal
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Task<Empty> EmptyTask(Task task)
         {
-#if TASK_COMPLETED
-            if (task.IsCompletedSuccessfully) return Empty.InstanceTask;
-#else
-            if (task.Status == TaskStatus.RanToCompletion) return Empty.InstanceTask;
-#endif
+            if (task.RanToCompletion()) return Empty.InstanceTask;
 
             return Awaited(task);
             static async Task<Empty> Awaited(Task t)
             {
-                await t;
+                await t.ConfigureAwait(false);
                 return Empty.Instance;
             }
         }
@@ -67,10 +63,10 @@ namespace ProtoBuf.Grpc.Internal
                 var headersTask = result.ResponseHeadersAsync;
                 if (headersTask != null)
                 {
-                    var headers = await headersTask;
-                    if (headers != null) await context.WriteResponseHeadersAsync(headers);
+                    var headers = await headersTask.ConfigureAwait(false);
+                    if (headers != null) await context.WriteResponseHeadersAsync(headers).ConfigureAwait(false);
                 }
-                var value = await result;
+                var value = await result.ConfigureAwait(false);
                 var trailers = result.GetTrailers();
                 if (trailers != null)
                 {
@@ -90,17 +86,17 @@ namespace ProtoBuf.Grpc.Internal
                 var headersTask = result.ResponseHeadersAsync;
                 if (headersTask != null)
                 {
-                    var headers = await headersTask;
-                    if (headers != null) await context.WriteResponseHeadersAsync(headers);
+                    var headers = await headersTask.ConfigureAwait(false);
+                    if (headers != null) await context.WriteResponseHeadersAsync(headers).ConfigureAwait(false);
                 }
                 var reader = result.ResponseStream;
                 if (reader != null)
                 {
                     using (reader)
                     {
-                        while (await reader.MoveNext(context.CancellationToken))
+                        while (await reader.MoveNext(context.CancellationToken).ConfigureAwait(false))
                         {
-                            await writer.WriteAsync(reader.Current);
+                            await writer.WriteAsync(reader.Current).ConfigureAwait(false);
                         }
                     }
                 }
@@ -121,7 +117,7 @@ namespace ProtoBuf.Grpc.Internal
         [Browsable(false), EditorBrowsable(EditorBrowsableState.Never)]
         public static async IAsyncEnumerable<T> AsAsyncEnumerable<T>(this IAsyncStreamReader<T> reader, [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            while (await reader.MoveNext(cancellationToken))
+            while (await reader.MoveNext(cancellationToken).ConfigureAwait(false))
             {
                 yield return reader.Current;
             }
@@ -134,10 +130,9 @@ namespace ProtoBuf.Grpc.Internal
         [Browsable(false), EditorBrowsable(EditorBrowsableState.Never)]
         public static async Task WriteTo<T>(this IAsyncEnumerable<T> reader, IServerStreamWriter<T> writer, CancellationToken cancellationToken)
         {
-            await using var iter = reader.GetAsyncEnumerator(cancellationToken);
-            while (await iter.MoveNextAsync())
+            await foreach (var value in reader.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                await writer.WriteAsync(iter.Current);
+                await writer.WriteAsync(value).ConfigureAwait(false);
             }
         }
 
@@ -153,8 +148,16 @@ namespace ProtoBuf.Grpc.Internal
             where TRequest : class
             where TResponse : class
         {
-            context.Prepare();
-            return invoker.BlockingUnaryCall(method, host, context.CallOptions, request);
+            var metadata = context.Prepare();
+            try
+            {
+                return invoker.BlockingUnaryCall(method, host, context.CallOptions, request);
+            }
+            catch (RpcException fault)
+            {
+                metadata?.SetTrailers(fault);
+                throw;
+            }
         }
 
         /// <summary>
@@ -169,8 +172,16 @@ namespace ProtoBuf.Grpc.Internal
             where TRequest : class
             where TResponse : class
         {
-            context.Prepare();
-            invoker.BlockingUnaryCall(method, host, context.CallOptions, request);
+            var metadata = context.Prepare();
+            try
+            {
+                invoker.BlockingUnaryCall(method, host, context.CallOptions, request);
+            }
+            catch(RpcException fault)
+            {
+                metadata?.SetTrailers(fault);
+                throw;
+            }
         }
 
         /// <summary>
@@ -184,7 +195,8 @@ namespace ProtoBuf.Grpc.Internal
             CallInvoker invoker, Method<TRequest, TResponse> method, TRequest request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => UnaryTaskAsyncImpl<TRequest, TResponse>(invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request), context.Prepare());
+            => UnaryTaskAsyncImpl<TRequest, TResponse>(invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request),
+                context.Prepare(), context.CancellationToken);
 
         /// <summary>
         /// Performs a gRPC asynchronous unary call
@@ -197,7 +209,9 @@ namespace ProtoBuf.Grpc.Internal
             Method<TRequest, TResponse> method, TRequest request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => new ValueTask<TResponse>(UnaryTaskAsyncImpl<TRequest, TResponse>(invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request), context.Prepare()));
+            => new ValueTask<TResponse>(UnaryTaskAsyncImpl<TRequest, TResponse>(
+                invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request),
+                context.Prepare(), context.CancellationToken));
 
         /// <summary>
         /// Performs a gRPC asynchronous unary call
@@ -210,21 +224,30 @@ namespace ProtoBuf.Grpc.Internal
             Method<TRequest, TResponse> method, TRequest request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => new ValueTask(UnaryTaskAsyncImpl<TRequest, TResponse>(invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request), context.Prepare()));
+            => new ValueTask(UnaryTaskAsyncImpl<TRequest, TResponse>(invoker.AsyncUnaryCall<TRequest, TResponse>(method, host, context.CallOptions, request), context.Prepare(), context.CancellationToken));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static async Task<TResponse> UnaryTaskAsyncImpl<TRequest, TResponse>(
-            AsyncUnaryCall<TResponse> call, MetadataContext? metadata)
+            AsyncUnaryCall<TResponse> call, MetadataContext? metadata, CancellationToken cancellationToken)
         {
             using (call)
             {
-                if (metadata != null) metadata.Headers = await call.ResponseHeadersAsync;
-                var value = await call;
-                if (metadata != null)
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (metadata != null) await metadata.SetHeadersAsync(call.ResponseHeadersAsync).ConfigureAwait(false);
+
+                TResponse value;
+                try
                 {
-                    metadata.Trailers = call.GetTrailers();
-                    metadata.Status = call.GetStatus();
+                    value = await call.ResponseAsync.ConfigureAwait(false);
                 }
+                catch (RpcException fault)
+                {
+                    metadata?.SetTrailers(fault);
+                    throw;
+                }
+                metadata?.SetTrailers(call, c => c.GetStatus(), c => c.GetTrailers());
+
                 return value;
             }
         }
@@ -244,22 +267,39 @@ namespace ProtoBuf.Grpc.Internal
 
         private static async IAsyncEnumerable<TResponse> ServerStreamingAsyncImpl<TRequest, TResponse>(
             AsyncServerStreamingCall<TResponse> call, MetadataContext? metadata,
-            [EnumeratorCancellation] CancellationToken _)
+            [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            // note that the compiler/runtime will combine the context+consumer cancellation tokens as required;
+            // since we don't need to trigger our own cancellation, this is sufficient
             using (call)
             {
-                if (metadata != null) metadata.Headers = await call.ResponseHeadersAsync;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (metadata != null) await metadata.SetHeadersAsync(call.ResponseHeadersAsync).ConfigureAwait(false);
 
                 var seq = call.ResponseStream;
-                while (await seq.MoveNext(default))
+
+                bool haveMore;
+                do
                 {
-                    yield return seq.Current;
-                }
-                if (metadata != null)
-                {
-                    metadata.Trailers = call.GetTrailers();
-                    metadata.Status = call.GetStatus();
-                }
+                    try // this is a little awkward because we can't yield inside a try/catch,
+                    {   // but we want to catch the RpcException to capture the outbound headers
+                        haveMore = await seq.MoveNext(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (RpcException fault)
+                    {   // note: the RpcException doesn't seem to carry trailers in the managed
+                        // client; see https://github.com/grpc/grpc-dotnet/issues/915
+                        metadata?.SetTrailers(fault);
+                        throw;
+                    }
+
+                    if (haveMore)
+                    {
+                        yield return seq.Current;
+                    }
+                } while (haveMore);
+
+                metadata?.SetTrailers(call, c => c.GetStatus(), c => c.GetTrailers());
             }
         }
 
@@ -274,7 +314,7 @@ namespace ProtoBuf.Grpc.Internal
             CallInvoker invoker, Method<TRequest, TResponse> method, IAsyncEnumerable<TRequest> request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, request);
+            => ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, options.IgnoreStreamTermination, request);
 
         /// <summary>
         /// Performs a gRPC client-streaming call
@@ -287,7 +327,7 @@ namespace ProtoBuf.Grpc.Internal
             CallInvoker invoker, Method<TRequest, TResponse> method, IAsyncEnumerable<TRequest> request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => new ValueTask<TResponse>(ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, request));
+            => new ValueTask<TResponse>(ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, options.IgnoreStreamTermination, request));
 
         /// <summary>
         /// Performs a gRPC client-streaming call
@@ -300,34 +340,36 @@ namespace ProtoBuf.Grpc.Internal
             CallInvoker invoker, Method<TRequest, TResponse> method, IAsyncEnumerable<TRequest> request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => new ValueTask(ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, request));
+            => new ValueTask(ClientStreamingTaskAsyncImpl(invoker.AsyncClientStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, options.IgnoreStreamTermination, request));
 
         private static async Task<TResponse> ClientStreamingTaskAsyncImpl<TRequest, TResponse>(
             AsyncClientStreamingCall<TRequest, TResponse> call, MetadataContext? metadata,
-            CancellationToken cancellationToken, IAsyncEnumerable<TRequest> request)
+            CancellationToken cancellationToken, bool ignoreStreamTermination, IAsyncEnumerable<TRequest> request)
         {
             using (call)
             {
-                var output = call.RequestStream;
-                await using (var iter = request.GetAsyncEnumerator(cancellationToken))
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using var allDone = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, default);
+
+                if (metadata != null) await metadata.SetHeadersAsync(call.ResponseHeadersAsync).ConfigureAwait(false);
+
+                // send all the data *before* we check for a reply
+                try
                 {
-                    while (await iter.MoveNextAsync())
-                    {
-                        await output.WriteAsync(iter.Current);
-                    }
+                    await SendAll(call.RequestStream, request, allDone, ignoreStreamTermination).ConfigureAwait(false);
+
+                    allDone.Token.ThrowIfCancellationRequested();
+                    var result = await call.ResponseAsync.ConfigureAwait(false);
+
+                    metadata?.SetTrailers(call, c => c.GetStatus(), c => c.GetTrailers());
+                    return result;
                 }
-                await output.CompleteAsync();
-
-                if (metadata != null) metadata.Headers = await call.ResponseHeadersAsync;
-
-                var result = await call.ResponseAsync;
-
-                if (metadata != null)
+                catch (RpcException fault)
                 {
-                    metadata.Trailers = call.GetTrailers();
-                    metadata.Status = call.GetStatus();
+                    metadata?.SetTrailers(fault);
+                    throw;
                 }
-                return result;
             }
         }
 
@@ -342,49 +384,104 @@ namespace ProtoBuf.Grpc.Internal
             CallInvoker invoker, Method<TRequest, TResponse> method, IAsyncEnumerable<TRequest> request, string? host = null)
             where TRequest : class
             where TResponse : class
-            => DuplexAsyncImpl<TRequest, TResponse>(invoker.AsyncDuplexStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, request);
+            => DuplexAsyncImpl<TRequest, TResponse>(invoker.AsyncDuplexStreamingCall<TRequest, TResponse>(method, host, options.CallOptions), options.Prepare(), options.CancellationToken, options.IgnoreStreamTermination, request);
 
         private static async IAsyncEnumerable<TResponse> DuplexAsyncImpl<TRequest, TResponse>(
             AsyncDuplexStreamingCall<TRequest, TResponse> call, MetadataContext? metadata,
-            [EnumeratorCancellation] CancellationToken cancellationToken, IAsyncEnumerable<TRequest> request)
+            CancellationToken contextCancel, bool ignoreStreamTermination, IAsyncEnumerable<TRequest> request, [EnumeratorCancellation] CancellationToken consumerCancel = default)
         {
             using (call)
             {
-                // we'll run the "send" as a concurrent operation
-                var sendAll = Task.Run(() => SendAll(call.RequestStream, request, cancellationToken), cancellationToken);
+                contextCancel.ThrowIfCancellationRequested();
+                consumerCancel.ThrowIfCancellationRequested();
 
-                if (metadata != null) metadata.Headers = await call.ResponseHeadersAsync;
-
-                var seq = call.ResponseStream;
-                while (await seq.MoveNext(default))
+                // create a linked CTS that can trigger cancellation when any of:
+                // - the context is cancelled
+                // - the consumer specified cancellation
+                // - the server indicates an end of the bidi stream
+                Task sendAll;
+                using var allDone = CancellationTokenSource.CreateLinkedTokenSource(contextCancel, consumerCancel);
+                try
                 {
-                    yield return seq.Current;
-                }
-                await sendAll; // observe any problems from sending
+                    // we'll run the "send" as a concurrent operation
+                    sendAll = Task.Run(() => SendAll(call.RequestStream, request, allDone, ignoreStreamTermination), allDone.Token);
 
-                if (metadata != null)
-                {
-                    metadata.Trailers = call.GetTrailers();
-                    metadata.Status = call.GetStatus();
+                    if (metadata != null) await metadata.SetHeadersAsync(call.ResponseHeadersAsync).ConfigureAwait(false);
+
+                    var seq = call.ResponseStream;
+
+                    bool haveMore;
+                    do
+                    {
+                        try // this is a little awkward because we can't yield inside a try/catch,
+                        {   // but we want to catch the RpcException to capture the outbound headers
+                            haveMore = await seq.MoveNext(allDone.Token).ConfigureAwait(false);
+                        }
+                        catch (RpcException fault)
+                        {
+                            metadata?.SetTrailers(fault);
+                            throw;
+                        }
+
+                        if (haveMore)
+                        {
+                            yield return seq.Current;
+                        }
+                    } while (haveMore);
                 }
+                finally
+                {   // want to cancel the producer *however* we exit
+                    allDone.Cancel();
+                }
+
+                try
+                {
+                    await sendAll.ConfigureAwait(false); // observe any problems from sending
+                }
+                catch (OperationCanceledException) { }
+                catch (RpcException fault)
+                {
+                    metadata?.SetTrailers(fault);
+                    throw;
+                }
+                metadata?.SetTrailers(call, c => c.GetStatus(), c => c.GetTrailers());
             }
         }
 
-        private static async Task SendAll<T>(IClientStreamWriter<T> output, IAsyncEnumerable<T> request, CancellationToken cancellationToken)
+        static async Task SendAll<T>(IClientStreamWriter<T> output, IAsyncEnumerable<T> request, CancellationTokenSource allDone, bool ignoreStreamTermination)
         {
+            if (allDone.IsCancellationRequested) allDone.Token.ThrowIfCancellationRequested();
             try
             {
-                await using (var iter = request.GetAsyncEnumerator(cancellationToken))
+                await foreach (var value in request.WithCancellation(allDone.Token).ConfigureAwait(false))
                 {
-                    while (await iter.MoveNextAsync())
+                    try
                     {
-                        var item = iter.Current;
-                        await output.WriteAsync(item);
+                        if (ignoreStreamTermination && allDone.IsCancellationRequested) break;
+                        await output.WriteAsync(value).ConfigureAwait(false);
                     }
+                    catch (Exception ex)
+                    {
+                        if (ignoreStreamTermination) break;
+                        throw new IncompleteSendRpcException(ex);
+                    }
+
+                    // happy to bomb out, as long as we weren't holding a value at the time
+                    if (allDone.IsCancellationRequested) allDone.Token.ThrowIfCancellationRequested();
                 }
-                await output.CompleteAsync();
+                await output.CompleteAsync().ConfigureAwait(false);
             }
-            catch (TaskCanceledException) { }
+            catch
+            {
+                allDone.Cancel();
+                throw;
+            }
         }
+    }
+    internal sealed class IncompleteSendRpcException : Exception
+    {
+        public IncompleteSendRpcException(Exception fault) : base(
+            $"A message could not be sent because the server had already terminated the connection; this exception can be suppressed by specifying the {nameof(CallContextFlags.IgnoreStreamTermination)} flag when creating the {nameof(CallContext)}", fault)
+        { }
     }
 }

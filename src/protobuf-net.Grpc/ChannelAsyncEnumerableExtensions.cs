@@ -22,6 +22,13 @@ namespace ProtoBuf.Grpc
         /// <summary>
         /// Consumes a channel as an asynchronous sequence
         /// </summary>
+        public static IAsyncEnumerable<T> AsAsyncEnumerable<T>(this Channel<T> channel, bool completeWriterOnCancellation, CancellationToken cancellationToken = default)
+            // note: we can't check CanBeCancelled too early here, as the CT passed to the iterator can be *different*
+            => completeWriterOnCancellation ? AsAsyncEnumerableCompleteWriter(channel, cancellationToken) : AsAsyncEnumerable(channel.Reader, cancellationToken);
+
+        /// <summary>
+        /// Consumes a channel as an asynchronous sequence
+        /// </summary>
         public static async IAsyncEnumerable<T> AsAsyncEnumerable<T>(this ChannelReader<T> reader, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
@@ -43,10 +50,42 @@ namespace ProtoBuf.Grpc
         /// <summary>
         /// Consumes a channel as an asynchronous sequence
         /// </summary>
+        public static IAsyncEnumerable<T> AsAsyncEnumerable<T>(this Channel<T> channel, bool completeWriterOnCancellation, CancellationToken cancellationToken = default)
+            // note: we can't check CanBeCancelled too early here, as the CT passed to the iterator can be *different*
+            => completeWriterOnCancellation ? AsAsyncEnumerableCloseWriter(channel, cancellationToken) : AsAsyncEnumerable(channel.Reader, cancellationToken);
+
+        /// <summary>
+        /// Consumes a channel as an asynchronous sequence
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IAsyncEnumerable<T> AsAsyncEnumerable<T>(this ChannelReader<T> reader, CancellationToken cancellationToken = default)
             => reader.ReadAllAsync(cancellationToken);
 #endif
+
+        private static async IAsyncEnumerable<T> AsAsyncEnumerableCompleteWriter<T>(this Channel<T> channel, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            static void TryCompleteWriter(object state)
+            {
+                try
+                {
+                    if (state is Channel<T> channel)
+                    {
+                        channel.Writer.Complete();
+                    }
+                }
+                catch { }
+            }
+            using (cancellationToken.Register(s => TryCompleteWriter(s), channel, false))
+            {
+                while (await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    while (channel.Reader.TryRead(out T item))
+                    {
+                        yield return item;
+                    }
+                }
+            }
+        }
 
         private static readonly UnboundedChannelOptions s_defaultOptions = new UnboundedChannelOptions {
             AllowSynchronousContinuations = true, SingleReader = true, SingleWriter = true };
@@ -71,15 +110,11 @@ namespace ProtoBuf.Grpc
             {
                 try
                 {
-                    await using (var iter = sequence.GetAsyncEnumerator(cancellationToken))
+                    await foreach (var value in sequence.WithCancellation(cancellationToken).ConfigureAwait(false))
                     {
-                        while (await iter.MoveNextAsync())
+                        while (!writer.TryWrite(value))
                         {
-                            var value = iter.Current;
-                            while (!writer.TryWrite(value))
-                            {
-                                await writer.WaitToWriteAsync(cancellationToken);
-                            }
+                            await writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false);
                         }
                     }
                     writer.TryComplete();

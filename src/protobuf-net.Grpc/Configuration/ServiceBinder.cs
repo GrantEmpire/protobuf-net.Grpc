@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Linq;
 using System.Reflection;
-using System.ServiceModel;
 
 namespace ProtoBuf.Grpc.Configuration
 {
@@ -29,7 +28,30 @@ namespace ProtoBuf.Grpc.Configuration
             serviceName = contractType.Namespace + "." + serviceName; // Whatever.Foo
             serviceName = serviceName.Replace('+', '.'); // nested types
 
+            int cut;
+            if (contractType.IsGenericType && (cut = serviceName.IndexOf('`')) >= 0)
+            {
+                var parts = GetGenericParts(contractType);
+                serviceName = serviceName.Substring(0, cut)
+                    + "_" + string.Join("_", parts);
+            }
+
             return serviceName ?? "";
+        }
+
+        /// <summary>
+        /// Gets the default name for a potential data-contract
+        /// </summary>
+        protected virtual string GetDataContractName(Type contractType)
+        {
+            var attribs = Attribute.GetCustomAttributes(contractType, inherit: true);
+            var attrib = attribs.FirstOrDefault(x => x.GetType().FullName == "ProtoBuf.ProtoContractAttribute");
+            if (TryGetProperty(attrib, "Name", out string name) && !string.IsNullOrWhiteSpace(name)) return name;
+
+            attrib = attribs.FirstOrDefault(x => x.GetType().FullName == "System.Runtime.Serialization.DataContractAttribute");
+            if (TryGetProperty(attrib, "Name", out name) && !string.IsNullOrWhiteSpace(name)) return name;
+
+            return contractType.Name;
         }
 
         /// <summary>
@@ -56,17 +78,44 @@ namespace ProtoBuf.Grpc.Configuration
                 return true;
             }
 
-            var sca = (ServiceContractAttribute?)Attribute.GetCustomAttribute(contractType, typeof(ServiceContractAttribute), inherit: true);
-            if (sca == null)
+            string? serviceName = null;
+            var attribs = Attribute.GetCustomAttributes(contractType, inherit: true);
+            var sa = attribs.OfType<ServiceAttribute>().FirstOrDefault();
+            if (sa == null)
             {
-                name = default;
-                return false;
+                // note: uses runtime discovery instead of hard ref because of bind/load problems
+                var sca = attribs.FirstOrDefault(x => x.GetType().FullName == "System.ServiceModel.ServiceContractAttribute");
+                if (sca == null)
+                {
+                    name = default;
+                    return false;
+                }
+                TryGetProperty(sca, "Name", out serviceName);
             }
-            var serviceName = sca?.Name;
+            else
+            {
+                serviceName = sa.Name;
+            }
             if (string.IsNullOrWhiteSpace(serviceName))
+            {
                 serviceName = GetDefaultName(contractType);
+            }
+            else if (contractType.IsGenericType)
+            {
+                var parts = GetGenericParts(contractType);
+                serviceName = string.Format(serviceName, parts);
+            }
             name = serviceName;
             return !string.IsNullOrWhiteSpace(name);
+        }
+
+        private string[] GetGenericParts(Type contractType)
+        {
+            var args = contractType.GetGenericArguments();
+            var parts = new string[args.Length];
+            for (int i = 0; i < parts.Length; i++)
+                parts[i] = GetDataContractName(args[i]);
+            return parts;
         }
 
         /// <summary>
@@ -80,12 +129,42 @@ namespace ProtoBuf.Grpc.Configuration
                 return false;
             }
 
-            var oca = (OperationContractAttribute?)Attribute.GetCustomAttribute(method, typeof(OperationContractAttribute), inherit: true);
-            string? opName = oca?.Name;
+            string? opName = null;
+            var attribs = Attribute.GetCustomAttributes(method, inherit: true);
+            var oa = attribs.OfType<OperationAttribute>().FirstOrDefault();
+            if (oa == null)
+            {
+                // note: uses runtime discovery instead of hard ref because of bind/load problems
+                var oca = attribs
+                    .FirstOrDefault(x => x.GetType().FullName == "System.ServiceModel.OperationContractAttribute");
+                TryGetProperty(oca, "Name", out opName);
+            }
+            else
+            {
+                opName = oa.Name;
+            }
             if (string.IsNullOrWhiteSpace(opName))
                 opName = GetDefaultName(method);
             name = opName;
             return !string.IsNullOrWhiteSpace(name);
+        }
+
+        static bool TryGetProperty<T>(Attribute obj, string name, out T value)
+        {
+            value = default!;
+            if (obj != null)
+            {
+                var prop = obj.GetType().GetProperty(name);
+                if (prop != null)
+                {
+                    if (prop.GetValue(obj) is T typed)
+                    {
+                        value = typed;
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
     }
 }
